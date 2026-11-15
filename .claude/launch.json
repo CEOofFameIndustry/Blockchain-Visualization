@@ -1,0 +1,6 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    { "name": "blockchain", "runtimeExecutable": "cargo", "runtimeArgs": ["run", "--release", "--", "--no-browser", "--port", "7878"], "port": 7878 }
+  ]
+}

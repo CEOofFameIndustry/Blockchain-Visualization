@@ -1,0 +1,11 @@
+[package]
+name = "kursova_rust"
+version = "0.1.0"
+edition = "2024"
+description = "Візуалізація роботи блокчейну: Rust-ядро + Chromium як GUI"
+
+[dependencies]
+
+# Майнінг у debug-збірці теж має бути швидким.
+[profile.dev]
+opt-level = 2

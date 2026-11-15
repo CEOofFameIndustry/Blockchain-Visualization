@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Блокчейн</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main class="stage">
+    <canvas id="scene" aria-label="Граф блоків ланцюга"></canvas>
+  </main>
+
+  <aside class="panel" id="panel">
+    <header class="panel-head">
+      <h1>Блокчейн</h1>
+      <span class="status" id="status" data-tone="ok">валідний</span>
+    </header>
+
+    <dl class="stats">
+      <div><dt>Блоків</dt><dd id="stat-count">—</dd></div>
+      <div><dt>Складність</dt><dd id="stat-diff">—</dd></div>
+      <div><dt>Майнінг</dt><dd id="stat-mine">—</dd></div>
+    </dl>
+
+    <section class="section">
+      <form id="add-form" class="row">
+        <input id="add-data" type="text" placeholder="Дані нового блоку" maxlength="280" autocomplete="off" aria-label="Дані нового блоку">
+        <button class="btn primary" id="add-btn" type="submit" title="Створити блок: підібрати nonce, щоб хеш починався з потрібної кількості нулів">Майнити</button>
+      </form>
+      <label class="range" for="difficulty">
+        <span>Складність</span>
+        <input id="difficulty" type="range" min="1" max="5" step="1" value="3">
+        <output id="difficulty-out" for="difficulty">3</output>
+      </label>
+      <label class="check" for="explain-toggle">
+        <input id="explain-toggle" type="checkbox" checked>
+        <span>Пояснювати створення блоку</span>
+      </label>
+    </section>
+
+    <section class="section details" id="details" hidden>
+      <div class="section-head">
+        <span class="label">Блок <b id="d-index"></b></span>
+        <span class="tag" id="d-state"></span>
+        <button class="icon-btn" id="d-close" type="button" aria-label="Закрити">×</button>
+      </div>
+      <dl class="kv">
+        <dt>Час</dt><dd id="d-time"></dd>
+        <dt>Nonce</dt><dd id="d-nonce"></dd>
+        <dt>Хеш</dt><dd class="hash" id="d-hash"></dd>
+        <dt id="d-computed-label">Факт.</dt><dd class="hash bad" id="d-computed"></dd>
+        <dt>Попер.</dt><dd class="hash" id="d-prev"></dd>
+      </dl>
+      <textarea id="d-data" rows="2" maxlength="280" aria-label="Дані блоку"></textarea>
+      <div class="row">
+        <button class="btn" id="d-tamper" type="button" title="Змінити дані без перерахунку хешу">Підробити</button>
+        <button class="btn" id="d-mine" type="button" title="Знайти новий nonce для цього блоку">Перемайнити</button>
+      </div>
+      <button class="btn ghost wide" id="d-cascade" type="button">Перемайнити до кінця</button>
+      <button class="btn ghost wide" id="d-explain" type="button" title="Покрокове пояснення для цього блоку">Як створено цей блок</button>
+    </section>
+
+    <section class="row">
+      <button class="btn" id="validate" type="button">Перевірити</button>
+      <button class="btn ghost" id="reset" type="button" title="Видалити збережений ланцюг і почати з початкових блоків">Скинути</button>
+    </section>
+
+    <ol class="log" id="log" aria-live="polite"></ol>
+    <div class="panel-grip" id="panel-grip" role="separator" aria-orientation="horizontal" title="Потягніть, щоб змінити висоту панелі · подвійний клік — автоматично"></div>
+  </aside>
+
+  <script type="module" src="/js/main.js"></script>
+</body>
+</html>
