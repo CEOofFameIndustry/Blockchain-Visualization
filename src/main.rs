@@ -1,83 +1,35 @@
-//! Візуалізація роботи блокчейну.
-//!
-//! Rust-ядро тримає ланцюг, майнить блоки та перевіряє цілісність,
-//! а Chromium (режим --app) відображає інтерфейс, отриманий з локального сервера.
-
 mod blockchain;
-mod browser;
-mod json;
-mod server;
-mod sha256;
-mod storage;
 
-use std::net::TcpListener;
-use std::process::ExitCode;
-use std::sync::{Arc, Mutex};
+use std::fs;
+use std::io::Cursor;
+use std::process::{Child, Command, Stdio};
 use std::thread;
-use std::time::{Duration, Instant};
 
 use blockchain::Blockchain;
-use server::{Node, Windows};
-use storage::Storage;
+use tiny_http::{Header, Method, Request, Response, Server};
 
-/// Скільки чекати першого вікна після запуску Chromium.
-const FIRST_WINDOW_TIMEOUT: Duration = Duration::from_secs(30);
-/// Пауза без жодного вікна, після якої програма завершується (переживає перезавантаження сторінки).
-const IDLE_GRACE: Duration = Duration::from_secs(3);
+const FILE: &str = "chain.json";
 
-fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let no_browser = args.iter().any(|a| a == "--no-browser");
-    let port: u16 = args
-        .iter()
-        .position(|a| a == "--port")
-        .and_then(|i| args.get(i + 1))
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(0);
-    let data_path = args.iter().position(|a| a == "--data").and_then(|i| args.get(i + 1));
-    let ephemeral = args.iter().any(|a| a == "--no-save");
-
-    let listener = match TcpListener::bind(("127.0.0.1", port)) {
-        Ok(listener) => listener,
-        Err(err) => {
-            eprintln!("не вдалося відкрити порт {port}: {err}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let url = match listener.local_addr() {
-        Ok(addr) => format!("http://{addr}/"),
-        Err(err) => {
-            eprintln!("не вдалося визначити адресу: {err}");
-            return ExitCode::FAILURE;
-        }
-    };
-
-    let node = Arc::new(Mutex::new(open_node(data_path.map(Into::into), ephemeral)));
-    let windows = Arc::new(Windows::default());
-    let server_windows = Arc::clone(&windows);
-    thread::spawn(move || server::serve(listener, node, server_windows));
+fn main() {
+    let mut chain = Blockchain::load(FILE);
+    let server = Server::http("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/", server.server_addr().to_ip().unwrap());
     println!("Інтерфейс: {url}");
 
-    if no_browser {
-        println!("Режим без вікна. Ctrl+C — вихід.");
-        loop {
-            thread::park();
+    thread::spawn(move || {
+        for request in server.incoming_requests() {
+            handle(&mut chain, request);
         }
-    }
+    });
 
-    match browser::launch(&url) {
-        Ok(mut child) => {
-            // Не покладаємося на процес: Chromium може передати вікно вже запущеному
-            // екземпляру або перезапуститися. Стежимо за самими вікнами.
-            thread::spawn(move || {
-                let _ = child.wait();
-            });
-            wait_for_windows_closed(&windows);
-            ExitCode::SUCCESS
+    let profile = std::env::temp_dir().join(format!("kursova-chromium-{}", std::process::id()));
+    match open_browser(&url, &profile.to_string_lossy()) {
+        Some(mut browser) => {
+            let _ = browser.wait();
+            let _ = fs::remove_dir_all(&profile);
         }
-        Err(err) => {
-            eprintln!("{err}");
-            eprintln!("Відкрийте {url} у браузері вручну. Ctrl+C — вихід.");
+        None => {
+            println!("Chromium не знайдено. Відкрийте {url} у браузері. Ctrl+C: вихід.");
             loop {
                 thread::park();
             }
@@ -85,57 +37,78 @@ fn main() -> ExitCode {
     }
 }
 
-fn wait_for_windows_closed(windows: &Windows) {
-    let started = Instant::now();
-    let mut idle_since: Option<Instant> = None;
-    loop {
-        thread::sleep(Duration::from_millis(250));
-        if windows.open() > 0 {
-            idle_since = None;
-            continue;
-        }
-        if !windows.seen() {
-            if started.elapsed() > FIRST_WINDOW_TIMEOUT {
-                eprintln!("Вікно інтерфейсу так і не під'єдналося. Завершення.");
-                return;
-            }
-            continue;
-        }
-        if idle_since.get_or_insert_with(Instant::now).elapsed() >= IDLE_GRACE {
-            return;
+fn open_browser(url: &str, profile: &str) -> Option<Child> {
+    for name in ["chromium", "google-chrome-stable", "google-chrome", "chrome", "msedge"] {
+        let browser = Command::new(name)
+            .arg(format!("--app={url}"))
+            .arg(format!("--user-data-dir={profile}"))
+            .arg("--no-first-run")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        if let Ok(browser) = browser {
+            return Some(browser);
         }
     }
+    None
 }
 
-/// Відновлює ланцюг із диска або створює новий (і одразу зберігає).
-fn open_node(path: Option<std::path::PathBuf>, ephemeral: bool) -> Node {
-    if ephemeral {
-        println!("Ланцюг не зберігається (--no-save).");
-        return Node { chain: Blockchain::demo(), storage: None, restored: false };
-    }
-    let storage = Storage::new(path.unwrap_or_else(Storage::default_path));
-    let (chain, restored) = match storage.load() {
-        Ok(Some(chain)) => {
-            println!("Ланцюг відновлено: {} блоків із {}", chain.blocks.len(), storage.display());
-            (chain, true)
+fn handle(chain: &mut Blockchain, mut request: Request) {
+    let mut body = String::new();
+    let _ = request.as_reader().read_to_string(&mut body);
+    let url = request.url().to_string();
+    let (path, query) = url.split_once('?').unwrap_or((&url, ""));
+    let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+
+    let result = match (request.method(), parts.as_slice()) {
+        (Method::Get, ["api", "chain"]) => Some(Ok(())),
+        (Method::Post, ["api", "blocks"]) => Some(chain.add(&body)),
+        (Method::Post, ["api", "blocks", i, "data"]) => Some(index(i).and_then(|i| chain.tamper(i, &body))),
+        (Method::Post, ["api", "blocks", i, "mine"]) => Some(index(i).and_then(|i| chain.remine(i, query == "cascade=1"))),
+        (Method::Post, ["api", "difficulty"]) => Some(
+            query.strip_prefix("value=").and_then(|v| v.parse().ok()).ok_or("некоректна складність".to_string())
+                .and_then(|d| chain.set_difficulty(d)),
+        ),
+        (Method::Post, ["api", "reset"]) => {
+            *chain = Blockchain::demo();
+            Some(Ok(()))
         }
-        Ok(None) => {
-            println!("Створено новий ланцюг: {}", storage.display());
-            (Blockchain::demo(), false)
-        }
-        Err(err) => {
-            eprintln!("Збережений ланцюг пошкоджено ({err}).");
-            match storage.quarantine() {
-                Ok(bad) => eprintln!("Файл відкладено в {}; створено новий ланцюг.", bad.display()),
-                Err(e) => eprintln!("Не вдалося відкласти файл: {e}"),
-            }
-            (Blockchain::demo(), false)
-        }
+        _ => None,
     };
-    if !restored {
-        if let Err(err) = storage.save(&chain) {
-            eprintln!("Не вдалося зберегти ланцюг: {err}");
+
+    let response = match result {
+        Some(Ok(())) => {
+            chain.save(FILE);
+            reply(200, "application/json", chain.to_json().to_string())
         }
-    }
-    Node { chain, storage: Some(storage), restored }
+        Some(Err(message)) => reply(400, "text/plain", message),
+        None => static_file(path),
+    };
+    let _ = request.respond(response);
+}
+
+fn index(raw: &str) -> Result<usize, String> {
+    raw.parse().map_err(|_| "некоректний номер блоку".to_string())
+}
+
+fn static_file(path: &str) -> Response<Cursor<Vec<u8>>> {
+    let (mime, body) = match path {
+        "/" => ("text/html", include_str!("../frontend/index.html")),
+        "/style.css" => ("text/css", include_str!("../frontend/style.css")),
+        "/favicon.svg" => ("image/svg+xml", include_str!("../frontend/favicon.svg")),
+        "/js/main.js" => ("text/javascript", include_str!("../frontend/js/main.js")),
+        "/js/graph.js" => ("text/javascript", include_str!("../frontend/js/graph.js")),
+        "/js/explainer.js" => ("text/javascript", include_str!("../frontend/js/explainer.js")),
+        "/js/api.js" => ("text/javascript", include_str!("../frontend/js/api.js")),
+        "/js/log.js" => ("text/javascript", include_str!("../frontend/js/log.js")),
+        "/js/drawer.js" => ("text/javascript", include_str!("../frontend/js/drawer.js")),
+        "/js/links.js" => ("text/javascript", include_str!("../frontend/js/links.js")),
+        _ => return reply(404, "text/plain", "не знайдено".into()),
+    };
+    reply(200, mime, body.into())
+}
+
+fn reply(status: u16, mime: &str, body: String) -> Response<Cursor<Vec<u8>>> {
+    let header = Header::from_bytes("Content-Type", format!("{mime}; charset=utf-8")).unwrap();
+    Response::from_string(body).with_status_code(status).with_header(header)
 }

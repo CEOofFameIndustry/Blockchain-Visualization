@@ -1,38 +1,31 @@
-//! Модель блокчейну: блоки, майнінг (proof-of-work) і перевірка цілісності.
-
+use std::fs;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use crate::sha256;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
-pub const MIN_DIFFICULTY: u32 = 1;
-pub const MAX_DIFFICULTY: u32 = 5;
-pub const DEFAULT_DIFFICULTY: u32 = 3;
-pub const MAX_DATA_CHARS: usize = 280;
+const GENESIS_PREV: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
-/// `prev_hash` генезис-блоку.
-pub const GENESIS_PREV: &str = "0000000000000000000000000000000000000000000000000000000000000000";
-
-#[derive(Clone, Debug)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Block {
     pub index: u64,
-    /// Мілісекунди від Unix-епохи.
     pub timestamp: u64,
     pub data: String,
     pub prev_hash: String,
     pub nonce: u64,
-    /// Складність, з якою блок було замайнено (кількість нулів на початку хешу).
     pub difficulty: u32,
     pub hash: String,
-    /// Скільки хешів довелося перебрати під час майнінгу.
     pub attempts: u64,
     pub mine_micros: u64,
 }
 
 impl Block {
-    fn new(index: u64, data: String, prev_hash: String, difficulty: u32, timestamp: u64) -> Self {
+    fn new(index: u64, data: String, prev_hash: String, difficulty: u32) -> Block {
         let mut block = Block {
             index,
-            timestamp,
+            timestamp: now_ms(),
             data,
             prev_hash,
             nonce: 0,
@@ -45,115 +38,80 @@ impl Block {
         block
     }
 
-    /// Хеш заголовка блоку з поточним nonce.
     pub fn compute_hash(&self) -> String {
         let header = format!(
             "{}|{}|{}|{}|{}|{}",
             self.index, self.timestamp, self.prev_hash, self.difficulty, self.nonce, self.data
         );
-        sha256::hex(header.as_bytes())
+        format!("{:x}", Sha256::digest(header))
     }
 
-    /// Перебирає nonce, доки хеш не почнеться з `difficulty` нулів.
     pub fn mine(&mut self) {
         let started = Instant::now();
-        let mut nonce = 0u64;
+        let zeros = "0".repeat(self.difficulty as usize);
+        self.nonce = 0;
         loop {
-            self.nonce = nonce;
-            let hash = self.compute_hash();
-            if meets_difficulty(&hash, self.difficulty) {
-                self.hash = hash;
+            self.hash = self.compute_hash();
+            if self.hash.starts_with(&zeros) {
                 break;
             }
-            nonce += 1;
+            self.nonce += 1;
         }
-        self.attempts = nonce + 1;
+        self.attempts = self.nonce + 1;
         self.mine_micros = started.elapsed().as_micros() as u64;
     }
 }
 
-pub fn meets_difficulty(hash: &str, difficulty: u32) -> bool {
-    hash.len() >= difficulty as usize && hash.bytes().take(difficulty as usize).all(|b| b == b'0')
-}
-
-/// Результат перевірки одного блоку.
-#[derive(Clone, Debug, PartialEq)]
-pub struct BlockCheck {
-    /// Збережений хеш відповідає вмісту блоку.
-    pub hash_ok: bool,
-    /// `prev_hash` дорівнює хешу попереднього блоку.
-    pub link_ok: bool,
-    /// Хеш задовольняє складність (proof-of-work).
-    pub pow_ok: bool,
-    pub computed_hash: String,
-}
-
-impl BlockCheck {
-    pub fn valid(&self) -> bool {
-        self.hash_ok && self.link_ok && self.pow_ok
-    }
-}
-
+#[derive(Serialize, Deserialize)]
 pub struct Blockchain {
     pub blocks: Vec<Block>,
     pub difficulty: u32,
 }
 
 impl Blockchain {
-    pub fn new(difficulty: u32) -> Self {
-        let difficulty = difficulty.clamp(MIN_DIFFICULTY, MAX_DIFFICULTY);
-        let genesis = Block::new(0, "Genesis".into(), GENESIS_PREV.into(), difficulty, now_ms());
-        Blockchain { blocks: vec![genesis], difficulty }
-    }
-
-    /// Ланцюг із кількома демонстраційними транзакціями.
-    pub fn demo() -> Self {
-        let mut chain = Blockchain::new(DEFAULT_DIFFICULTY);
-        let start = now_ms() - 4 * 60_000;
-        chain.blocks[0].timestamp = start;
-        chain.blocks[0].mine();
-        for (i, data) in ["Аліса → Боб: 2.5", "Боб → Віра: 1.0", "Віра → Аліса: 0.4", "Гліб → Боб: 3.2"]
-            .into_iter()
-            .enumerate()
-        {
-            chain.push(data.into(), start + (i as u64 + 1) * 60_000);
+    pub fn demo() -> Blockchain {
+        let mut chain = Blockchain { blocks: vec![Block::new(0, "Genesis".into(), GENESIS_PREV.into(), 3)], difficulty: 3 };
+        for data in ["Аліса → Боб: 2.5", "Боб → Віра: 1.0", "Віра → Аліса: 0.4", "Гліб → Боб: 3.2"] {
+            chain.add(data).unwrap();
         }
         chain
     }
 
-    pub fn reset(&mut self) {
-        *self = Blockchain::demo();
+    pub fn load(path: &str) -> Blockchain {
+        match fs::read_to_string(path) {
+            Ok(text) => serde_json::from_str(&text).unwrap_or_else(|err| {
+                eprintln!("Файл {path} пошкоджено ({err}), створено новий ланцюг.");
+                Blockchain::demo()
+            }),
+            Err(_) => Blockchain::demo(),
+        }
     }
 
-    pub fn tip(&self) -> &Block {
-        self.blocks.last().expect("ланцюг завжди містить генезис-блок")
+    pub fn save(&self, path: &str) {
+        let text = serde_json::to_string_pretty(self).unwrap();
+        if let Err(err) = fs::write(path, text) {
+            eprintln!("Не вдалося зберегти ланцюг у {path}: {err}");
+        }
     }
 
-    fn push(&mut self, data: String, timestamp: u64) -> &Block {
-        let tip = self.tip();
-        let block = Block::new(tip.index + 1, data, tip.hash.clone(), self.difficulty, timestamp);
+    pub fn add(&mut self, data: &str) -> Result<(), String> {
+        let data = check_data(data)?;
+        let last = self.blocks.last().unwrap();
+        let block = Block::new(last.index + 1, data, last.hash.clone(), self.difficulty);
         self.blocks.push(block);
-        self.tip()
+        Ok(())
     }
 
-    /// Майнить і додає новий блок у кінець ланцюга.
-    pub fn add(&mut self, data: &str) -> Result<&Block, String> {
-        let data = clean_data(data)?;
-        Ok(self.push(data, now_ms()))
-    }
-
-    /// Змінює дані блоку без перерахунку хешу — імітація атаки.
     pub fn tamper(&mut self, index: usize, data: &str) -> Result<(), String> {
-        let data = clean_data(data)?;
-        let block = self.blocks.get_mut(index).ok_or_else(|| format!("блоку #{index} не існує"))?;
+        let data = check_data(data)?;
+        let block = self.blocks.get_mut(index).ok_or("такого блоку немає")?;
         block.data = data;
         Ok(())
     }
 
-    /// Перемайнює блок (за потреби — і всі наступні), прив'язуючи до попереднього.
     pub fn remine(&mut self, index: usize, cascade: bool) -> Result<(), String> {
         if index >= self.blocks.len() {
-            return Err(format!("блоку #{index} не існує"));
+            return Err("такого блоку немає".into());
         }
         let end = if cascade { self.blocks.len() } else { index + 1 };
         for i in index..end {
@@ -167,45 +125,61 @@ impl Blockchain {
     }
 
     pub fn set_difficulty(&mut self, difficulty: u32) -> Result<(), String> {
-        if !(MIN_DIFFICULTY..=MAX_DIFFICULTY).contains(&difficulty) {
-            return Err(format!("складність має бути від {MIN_DIFFICULTY} до {MAX_DIFFICULTY}"));
+        if !(1..=5).contains(&difficulty) {
+            return Err("складність має бути від 1 до 5".into());
         }
         self.difficulty = difficulty;
         Ok(())
     }
 
-    /// Перевіряє кожен блок незалежно.
-    pub fn check(&self) -> Vec<BlockCheck> {
-        self.blocks
-            .iter()
-            .enumerate()
-            .map(|(i, block)| {
-                let computed_hash = block.compute_hash();
-                let expected_prev = if i == 0 { GENESIS_PREV } else { self.blocks[i - 1].hash.as_str() };
-                BlockCheck {
-                    hash_ok: computed_hash == block.hash,
-                    link_ok: block.prev_hash == expected_prev,
-                    pow_ok: meets_difficulty(&block.hash, block.difficulty),
-                    computed_hash,
-                }
-            })
-            .collect()
+    pub fn check(&self, i: usize) -> (bool, bool, bool) {
+        let block = &self.blocks[i];
+        let prev = if i == 0 { GENESIS_PREV } else { &self.blocks[i - 1].hash };
+        let hash_ok = block.compute_hash() == block.hash;
+        let link_ok = block.prev_hash == prev;
+        let pow_ok = block.hash.starts_with(&"0".repeat(block.difficulty as usize));
+        (hash_ok, link_ok, pow_ok)
+    }
+
+    pub fn to_json(&self) -> Value {
+        let mut blocks = Vec::new();
+        let mut first_invalid = None;
+        for (i, block) in self.blocks.iter().enumerate() {
+            let (hash_ok, link_ok, pow_ok) = self.check(i);
+            let valid = hash_ok && link_ok && pow_ok;
+            if !valid && first_invalid.is_none() {
+                first_invalid = Some(i);
+            }
+            let mut item = serde_json::to_value(block).unwrap();
+            item["hashOk"] = json!(hash_ok);
+            item["linkOk"] = json!(link_ok);
+            item["powOk"] = json!(pow_ok);
+            item["valid"] = json!(valid);
+            item["computedHash"] = json!(block.compute_hash());
+            blocks.push(item);
+        }
+        json!({
+            "difficulty": self.difficulty,
+            "valid": first_invalid.is_none(),
+            "firstInvalid": first_invalid,
+            "blocks": blocks,
+        })
     }
 }
 
-fn clean_data(data: &str) -> Result<String, String> {
+fn check_data(data: &str) -> Result<String, String> {
     let data = data.trim();
     if data.is_empty() {
         return Err("дані блоку не можуть бути порожніми".into());
     }
-    if data.chars().count() > MAX_DATA_CHARS {
-        return Err(format!("дані блоку — щонайбільше {MAX_DATA_CHARS} символів"));
+    if data.chars().count() > 280 {
+        return Err("дані блоку: щонайбільше 280 символів".into());
     }
     Ok(data.to_string())
 }
 
-pub fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+fn now_ms() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64
 }
 
 #[cfg(test)]
@@ -213,35 +187,29 @@ mod tests {
     use super::*;
 
     fn all_valid(chain: &Blockchain) -> bool {
-        chain.check().iter().all(BlockCheck::valid)
+        (0..chain.blocks.len()).all(|i| chain.check(i) == (true, true, true))
     }
 
     #[test]
-    fn demo_chain_is_valid_and_mined() {
+    fn demo_chain_is_valid() {
         let chain = Blockchain::demo();
         assert_eq!(chain.blocks.len(), 5);
         assert!(all_valid(&chain));
-        assert!(chain.blocks.iter().all(|b| b.hash.starts_with("000")));
     }
 
     #[test]
-    fn tamper_breaks_only_hash_of_that_block() {
+    fn tamper_is_detected() {
         let mut chain = Blockchain::demo();
-        chain.tamper(2, "Боб → Мелорі: 1000").unwrap();
-        let checks = chain.check();
-        assert!(!checks[2].hash_ok);
-        assert!(checks[3].link_ok, "посилання наступного блоку ще ціле");
+        chain.tamper(2, "підробка").unwrap();
+        assert_eq!(chain.check(2), (false, true, true));
     }
 
     #[test]
-    fn remine_moves_break_to_next_block_and_cascade_fixes_it() {
+    fn remine_breaks_next_link_and_cascade_fixes_it() {
         let mut chain = Blockchain::demo();
         chain.tamper(2, "підробка").unwrap();
         chain.remine(2, false).unwrap();
-        let checks = chain.check();
-        assert!(checks[2].valid());
-        assert!(!checks[3].link_ok);
-
+        assert_eq!(chain.check(3), (true, false, true));
         chain.remine(2, true).unwrap();
         assert!(all_valid(&chain));
     }
@@ -250,17 +218,19 @@ mod tests {
     fn rejects_bad_input() {
         let mut chain = Blockchain::demo();
         assert!(chain.add("   ").is_err());
-        assert!(chain.add(&"x".repeat(MAX_DATA_CHARS + 1)).is_err());
+        assert!(chain.add(&"x".repeat(281)).is_err());
         assert!(chain.set_difficulty(9).is_err());
         assert!(chain.tamper(99, "x").is_err());
     }
 
     #[test]
-    fn difficulty_applies_to_new_blocks() {
-        let mut chain = Blockchain::new(1);
-        chain.set_difficulty(4).unwrap();
-        let block = chain.add("тест").unwrap();
-        assert!(block.hash.starts_with("0000"));
-        assert_eq!(block.difficulty, 4);
+    fn save_and_load() {
+        let path = std::env::temp_dir().join("kursova-test-chain.json");
+        let path = path.to_str().unwrap();
+        let chain = Blockchain::demo();
+        chain.save(path);
+        let loaded = Blockchain::load(path);
+        assert_eq!(loaded.blocks.last().unwrap().hash, chain.blocks.last().unwrap().hash);
+        let _ = fs::remove_file(path);
     }
 }

@@ -328,16 +328,8 @@ document.addEventListener('keydown', (e) => {
 
 /* ---------- старт ---------- */
 
-// Відкрите з'єднання каже Rust-ядру, що вікно живе; після закриття вікна програма завершується.
-new EventSource('/api/events');
-
 act(() => api.chain(), 'завантаження…').then((next) => {
   if (!next) return;
   graph.fit({ instant: true });
-  log.add(`Підключено до Rust-ядра: ${next.blocks.length} блоків, SHA-256, складність ${next.difficulty}`);
-  if (next.storage) {
-    log.add(next.restored
-      ? `Ланцюг відновлено з диска (${next.storage}) і перевірено: ${next.valid ? 'валідний' : `порушено з #${next.firstInvalid}`}`
-      : `Створено новий ланцюг; він зберігається в ${next.storage}`, next.valid ? 'info' : 'bad');
-  }
+  log.add(`Завантажено ланцюг: ${next.blocks.length} блоків, складність ${next.difficulty}`);
 });
